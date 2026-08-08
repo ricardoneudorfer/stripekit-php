@@ -1,239 +1,392 @@
-# StripeKit for PHP
+# StripeKit
 
-> **Coming Soon** — StripeKit for PHP is currently in the planning and early development stage.
+A complete, production-ready Stripe toolkit for PHP. StripeKit wraps the official `stripe/stripe-php` SDK with a simple, opinionated layer for customers, payment methods, payments, checkout, subscriptions, invoices, coupons and webhooks — so you can integrate Stripe into your own application without becoming a Stripe API expert.
 
-StripeKit is a developer-friendly Composer package for working with Stripe without requiring every project to implement the Stripe API from scratch. It is intended to provide a simple, consistent interface for payments, invoices, subscriptions, customers, products, prices, and related Stripe operations.
+You stay in full control of your database and UI. StripeKit only talks to Stripe: it creates and reads Stripe objects, normalizes the responses into clean, timezone-aware records, and — if you give it a storage adapter — persists that normalized state for you.
 
-The goal is to make common Stripe workflows easier to integrate while still allowing applications to retain control over their own data, database structure, and business logic.
+## Why StripeKit
 
-## Important Notice
-
-This README describes the **planned functionality and possible API design**. The examples, namespaces, imports, class names, method names, initialization options, return values, and feature list are subject to change as development progresses.
-
-The examples below are illustrative only. They do not represent a finished or currently available implementation.
-
-## Planned Features
-
-- Payment creation, confirmation, capture, cancellation, and status handling.
-- Customer and payment method management.
-- Invoice creation, item management, updating, finalizing, sending, paying, voiding, and deleting draft invoices.
-- Subscription creation, updating, pausing, resuming, cancelling, and scheduled cancellation.
-- Product and price management.
-- Optional database integration for storing Stripe-related data.
-- Support for custom application tables and custom data storage.
-- Automatic table management when custom tables are disabled.
-- Consistent success and failure responses for operations handled by the module.
-- Configurable timezone support, using UTC by default.
+- **One `init()` call.** Provide your secret key, choose `api` or `elements` mode, optionally set a timezone, and every module is ready to use.
+- **You choose the flow.** In `api` mode, payment and checkout calls return a hosted Stripe URL you redirect the customer to. In `elements` mode, they return a `clientSecret` your own frontend uses to confirm the payment with Stripe Elements. In `both` mode, you decide per call.
+- **Elements are fully optional.** The browser-side helpers ship as a separate JS asset under `resources/js/stripekit-elements.js`. Stripe Elements is inherently browser code, so it cannot run in PHP — StripeKit ships it as a companion frontend module you serve alongside your PHP backend. If you don't need Stripe Elements, you never have to include it.
+- **Timezones handled correctly.** Every timestamp StripeKit returns is first normalized to UTC (Stripe's native format), then — if you configured a timezone — converted once more into that timezone for display. Both values are always returned so you never have to do the math yourself.
+- **You own your data.** StripeKit never requires a database. Pass an optional `storage` adapter to persist customers, subscriptions, invoices, payments and payment methods in your own schema; without one, StripeKit still works, it just won't persist anything for you.
+- **Covers the whole billing surface.** Customers, payment methods, one-off payments, checkout (payment or subscription, with custom fields and coupons), subscriptions, invoices, coupons/promotion codes, and webhooks with automatic state sync.
 
 ## Installation
 
-Installation details will be added when the first development version is released.
-
-A possible future Composer configuration may look like this:
-
 ```bash
-composer require stripe-kit/stripe-kit
+composer require ricardoneudorfer/stripekit
 ```
 
-The package name, vendor name, namespace, and installation process may change before the first release.
+`stripe/stripe-php` is installed automatically as a dependency.
+
+If you plan to use Stripe Elements in the browser, serve the bundled asset at
+`vendor/ricardoneudorfer/stripekit/resources/js/stripekit-elements.js` from your
+public web root (or copy/symlink it into your own asset pipeline).
+
+## Quick start
+
+```php
+<?php
+
+require 'vendor/autoload.php';
+
+use StripeKit\StripeKit;
+
+$kit = StripeKit::init([
+    'secretKey' => getenv('STRIPE_SECRET_KEY'),
+    'mode' => 'api',
+    'timezone' => 'Europe/Amsterdam',
+    'currency' => 'eur',
+]);
+
+$payment = $kit->payments->create([
+    'amount' => 2500,
+    'currency' => 'eur',
+    'email' => 'customer@example.com',
+    'description' => 'Pro plan',
+]);
+
+echo $payment['hostedUrl'];
+```
+
+Every action StripeKit can perform is available under `$kit-><module>-><action>()`. Initialize `StripeKit` once and share the instance across your app (e.g. via a DI container or a singleton factory).
 
 ## Initialization
 
-StripeKit will require initialization before it can be used. StripeKit does not provide its own hosted database. A database connection must therefore be supplied by the application.
+```php
+StripeKit::init([
+    'secretKey' => string,
+    'publishableKey' => string,          // optional
+    'webhookSecret' => string,           // optional
+    'mode' => 'api' | 'elements' | 'both',
+    'timezone' => string,                // optional
+    'currency' => string,                // optional
+    'successUrl' => string,              // optional
+    'cancelUrl' => string,                // optional
+    'storage' => StorageAdapter,          // optional
+    'apiVersion' => string,               // optional
+    'appInfo' => ['name' => string, 'version' => string, 'url' => string], // optional
+    'debug' => bool,                      // optional
+    'maxNetworkRetries' => int,           // optional
+    'timeout' => int,                     // optional, milliseconds
+]);
+```
 
-A possible initialization structure:
+| Option | Required | Description |
+| --- | --- | --- |
+| `secretKey` | Yes | Your Stripe secret key (`sk_live_...` / `sk_test_...`). Never expose this in the browser. |
+| `mode` | Yes | `'api'`, `'elements'`, or `'both'`. Explained below. |
+| `publishableKey` | Only for `elements`/`both` | Your Stripe publishable key. Not used server-side, but returned via `$kit->toClientConfig()` so your frontend can fetch it from your own backend instead of hardcoding it. |
+| `webhookSecret` | Only if using `$kit->webhooks` | Your endpoint's signing secret from the Stripe Dashboard. |
+| `timezone` | No, defaults to `"UTC"` | Any IANA timezone, e.g. `"Europe/Amsterdam"`, `"America/New_York"`. See [Timezones](#timezones). |
+| `currency` | No, defaults to `"usd"` | Default 3-letter ISO currency for calls that don't specify one. |
+| `successUrl` / `cancelUrl` | No | Default redirect URLs used by hosted Checkout Sessions when not passed per call. |
+| `storage` | No | A `StorageAdapter` implementation. See [Storage adapter](#storage-adapter). |
+
+If required options are missing or invalid, `StripeKit::init()` throws a `ConfigurationError` immediately, so misconfiguration is caught at boot time rather than mid-request.
+
+### Choosing a mode
+
+This is the single most important decision StripeKit asks you to make, because it decides what your payment and checkout calls hand back to you:
+
+- **`mode: 'api'`** — StripeKit creates a Stripe-hosted Checkout Session and returns `hostedUrl`. You redirect the customer there; Stripe hosts the entire payment form. Nothing to build on your frontend.
+- **`mode: 'elements'`** — StripeKit creates a `PaymentIntent` (or `SetupIntent`) and returns `clientSecret`. You mount your own Stripe Elements form (using the optional `resources/js/stripekit-elements.js` helper, or your own code) and confirm the payment yourself. Full control over your UI.
+- **`mode: 'both'`** — StripeKit defaults to the `'api'` behavior, but every call that creates a payment or checkout accepts a `mode` (or `flowOverride`) argument to choose per call.
 
 ```php
-use StripeKit\StripeKit;
+$kit->payments->create(['amount' => 1000, 'mode' => 'elements']); // works even if global mode is 'api', as long as it's 'both'
+```
 
-$stripeKit = StripeKit::init([
-    'stripe_secret_key' => $_ENV['STRIPE_SECRET_KEY'],
+## Timezones
 
-    'database' => [
-        'host' => $_ENV['DB_HOST'],
-        'port' => 3306,
-        'database' => $_ENV['DB_NAME'],
-        'username' => $_ENV['DB_USERNAME'],
-        'password' => $_ENV['DB_PASSWORD'],
+Stripe stores every timestamp as a Unix epoch — which is UTC by definition. StripeKit always does the conversion in two explicit steps, never one:
+
+1. **Normalize to UTC.** The raw Unix timestamp is converted into an ISO-8601 UTC string. This is always available as the `...Utc` field (e.g. `currentPeriodEndUtc`, `issuedAtUtc`, `paidAtUtc`).
+2. **Convert to your configured timezone.** If you set a `timezone` on init (anything other than `"UTC"`, the default), that UTC value is converted once more into your chosen timezone and exposed as the matching `...Local` field (e.g. `currentPeriodEndLocal`).
+
+```php
+$kit = StripeKit::init(['secretKey' => $secretKey, 'mode' => 'api', 'timezone' => 'Asia/Tokyo']);
+
+$sub = $kit->subscriptions->retrieve('sub_123');
+echo $sub['currentPeriodEndUtc'];   // "2026-09-01T00:00:00.000Z"
+echo $sub['currentPeriodEndLocal']; // "2026-09-01T09:00:00" in Asia/Tokyo
+```
+
+If you don't set a `timezone`, both fields are UTC, and no double conversion happens. You can also use the exported helpers directly:
+
+```php
+use StripeKit\Support\Timezone;
+
+Timezone::unixToTimezone(1735689600, 'Europe/Amsterdam');
+Timezone::nowInTimezone('Europe/Amsterdam');
+```
+
+## Storage adapter
+
+StripeKit does not require a database, but every module that creates or reads Stripe state will call into an optional `storage` adapter if you provide one, so your own database always reflects reality without you writing that glue code yourself.
+
+```php
+use StripeKit\Contracts\StorageAdapter;
+
+class MyStorageAdapter extends StorageAdapter
+{
+    public function findUserByEmail(string $email): ?array { /* return ['id' => ..., 'stripeCustomerId' => ...] or null */ }
+    public function findUserById(string|int $id): ?array { /* ... */ }
+    public function saveCustomer(array $record): void { /* upsert into your users/customers table */ }
+    public function saveSubscription(array $record): void { /* upsert into your subscriptions table */ }
+    public function savePayment(array $record): void { /* upsert into your payments table */ }
+    public function saveInvoice(array $record): void { /* upsert into your invoices table */ }
+    public function savePaymentMethods(string|int $userId, array $records): void { /* replace the user's saved methods */ }
+    public function saveCoupon(array $record): void { /* cache coupon/promo code metadata */ }
+    public function markInvoiceDeleted(string $invoiceId): void { /* soft-delete */ }
+    public function hasProcessedWebhookEvent(string $eventId): bool { /* idempotency check, recommended in production */ }
+    public function markWebhookEventProcessed(string $eventId, string $type): void { /* ... */ }
+    public function saveCheckoutSession(array $session): void { /* persist in-flight custom checkout sessions */ }
+    public function getCheckoutSession(string $checkoutId): ?array { /* ... */ }
+}
+
+$kit = StripeKit::init(['secretKey' => $secretKey, 'mode' => 'api', 'storage' => new MyStorageAdapter()]);
+```
+
+Every method on the adapter is optional — override only what you need; `StorageAdapter` is an abstract class with safe no-op defaults. See `examples/storage-adapter-postgres.php` for a full PDO/Postgres-backed implementation.
+
+> **Note on statelessness:** `$kit->checkout` and `$kit->webhooks` fall back to in-process memory for checkout sessions and webhook idempotency when no storage adapter is supplied. That's fine for local development or a single-instance deployment, but for production deployments running multiple instances, provide `saveCheckoutSession`/`getCheckoutSession` and `hasProcessedWebhookEvent`/`markWebhookEventProcessed` so state is shared correctly. StripeKit will log a warning whenever it falls back.
+
+## Modules
+
+### `$kit->customers`
+
+```php
+$kit->customers->create(['email' => $email, 'name' => $name, 'phone' => null, 'address' => null, 'metadata' => null]);
+$kit->customers->findOrCreateByEmail($email);
+$kit->customers->retrieve($customerId);
+$kit->customers->update($customerId, ['name' => null, 'phone' => null, 'address' => null, 'defaultPaymentMethodId' => null, 'metadata' => null]);
+$kit->customers->delete($customerId);
+$kit->customers->list(['email' => null, 'limit' => null, 'startingAfter' => null]);
+$kit->customers->sync($customerId); // re-pull from Stripe and persist via storage
+```
+
+### `$kit->paymentMethods`
+
+```php
+$kit->paymentMethods->list($customerId);
+$kit->paymentMethods->attach(['paymentMethodId' => $id, 'customerId' => $customerId, 'setAsDefault' => false]);
+$kit->paymentMethods->detach($paymentMethodId);
+$kit->paymentMethods->setDefault($customerId, $paymentMethodId);
+$kit->paymentMethods->createSetupIntent(['customerId' => $customerId, 'usage' => null]); // to save a card for later, via Elements
+$kit->paymentMethods->sync($customerId);
+```
+
+### `$kit->payments`
+
+One-off payments (PaymentIntents), respecting the `mode` you configured.
+
+```php
+$payment = $kit->payments->create([
+    'amount' => 1999,            // minor currency units (cents)
+    'currency' => 'usd',
+    'email' => 'customer@example.com',
+    'description' => 'One-time purchase',
+]);
+// $payment['hostedUrl']    -> set when the resolved flow is 'api'
+// $payment['clientSecret'] -> set when the resolved flow is 'elements'
+
+$kit->payments->retrieve($paymentIntentId);
+$kit->payments->confirm($paymentIntentId, $paymentMethodId);
+$kit->payments->cancel($paymentIntentId);
+
+// Charge a card the customer already saved, without any customer interaction:
+$kit->payments->payWithSavedMethod([
+    'customerId' => $customerId,
+    'paymentMethodId' => $paymentMethodId,
+    'amount' => 999,
+    'currency' => 'usd',
+]);
+```
+
+### `$kit->checkout`
+
+The high-level module for building your own checkout flow: one-off payments or subscriptions, with optional custom fields and coupon codes, in either flow.
+
+```php
+$checkout = $kit->checkout->create([
+    'mode' => 'subscription',              // or 'payment'
+    'priceId' => 'price_123',              // required for subscriptions
+    'amount' => 4900,                      // required for one-off payments (and for subscriptions in 'elements' mode)
+    'email' => 'customer@example.com',
+    'couponCode' => 'WELCOME10',
+    'customFields' => [
+        ['key' => 'company_name', 'label' => 'Company name', 'required' => true],
     ],
-
-    // Recommended for applications that require custom data storage.
-    'use_custom_tables' => true,
-
-    // UTC is used when this option is omitted.
-    'timezone' => 'Europe/Amsterdam',
+    'fieldValues' => ['company_name' => 'Acme BV'],
 ]);
+
+$kit->checkout->get($checkout['id']);
+$kit->checkout->submitFields($checkout['id'], ['company_name' => 'Acme BV']);
+$kit->checkout->applyCoupon(['checkoutId' => $checkout['id'], 'couponCode' => 'SAVE20', 'originalAmount' => 4900]);
+$kit->checkout->markComplete($checkout['id']);
 ```
 
-The database configuration is expected to be required because StripeKit has no separate database of its own. The exact database driver, supported databases, option names, and initialization flow are still being evaluated.
-
-### Custom Tables
-
-Using `use_custom_tables => true` is expected to be the recommended option for applications that need full control over the data they store.
-
-With custom tables enabled, the application may be responsible for providing or configuring the required tables and data mappings. This allows developers to decide which additional information should be stored, how records are related to users, and how Stripe data fits into an existing database structure.
-
-The final custom-table API and schema requirements will be documented before the first stable release.
-
-### Managed Tables
-
-When `use_custom_tables` is set to `false`, StripeKit is planned to manage the required tables, inserts, updates, and related database operations automatically.
+### `$kit->subscriptions`
 
 ```php
-$stripeKit = StripeKit::init([
-    'stripe_secret_key' => $_ENV['STRIPE_SECRET_KEY'],
-    'database' => [
-        'host' => $_ENV['DB_HOST'],
-        'port' => 3306,
-        'database' => $_ENV['DB_NAME'],
-        'username' => $_ENV['DB_USERNAME'],
-        'password' => $_ENV['DB_PASSWORD'],
-    ],
-    'use_custom_tables' => false,
-    'timezone' => 'UTC',
-]);
+$kit->subscriptions->create(['customerId' => $customerId, 'priceId' => $priceId, 'quantity' => null, 'trialPeriodDays' => null, 'collectionMethod' => null]);
+$kit->subscriptions->retrieve($subscriptionId);
+$kit->subscriptions->cancel(['subscriptionId' => $subscriptionId, 'atPeriodEnd' => true]);
+$kit->subscriptions->resume($subscriptionId);
+$kit->subscriptions->toggleCollectionMethod(['subscriptionId' => $subscriptionId, 'collectionMethod' => 'send_invoice', 'daysUntilDue' => 14]);
+$kit->subscriptions->updateFields(['subscriptionId' => $subscriptionId, 'fieldValues' => ['seats' => '10']]);
+$kit->subscriptions->applyPromotionCode($subscriptionId, $promotionCodeId);
+$kit->subscriptions->listByCustomer($customerId);
+$kit->subscriptions->sync($subscriptionId);
 ```
 
-In this mode, the module is planned to return a simple success or failure result for database setup and related tasks. This should allow an application to stop startup when initialization fails or continue when the setup succeeds.
-
-A possible result format:
+### `$kit->invoices`
 
 ```php
-[
-    'success' => true,
-]
+$kit->invoices->retrieve($invoiceId);
+$kit->invoices->listByCustomer($customerId, $status);
+$kit->invoices->listBySubscription($subscriptionId);
+$kit->invoices->payWithSavedMethod(['invoiceId' => $invoiceId, 'customerId' => $customerId, 'paymentMethodId' => $paymentMethodId]);
+$kit->invoices->voidInvoice($invoiceId);
+$kit->invoices->finalize($invoiceId);
+$kit->invoices->sync($invoiceId);
 ```
 
-or:
+Invoices include a normalized `lineItems` array and both UTC and local timestamps for `dueAt`, `paidAt` and `issuedAt`.
+
+### `$kit->coupons`
 
 ```php
-[
-    'success' => false,
-    'error' => 'Database initialization failed',
-]
+$kit->coupons->create(['code' => 'SUMMER25', 'discountType' => 'percent', 'discountValue' => 25, 'duration' => 'once']);
+$kit->coupons->validate('SUMMER25'); // returns null if invalid, expired or inactive
+$kit->coupons->applyToSubscription($subscriptionId, $stripePromotionCodeId);
+$kit->coupons->list();
+$kit->coupons->deactivate($stripePromotionCodeId);
 ```
 
-The final response format may change.
-
-## Planned Payment Usage
-
-The following is an example of a possible payment workflow:
+### `$kit->webhooks`
 
 ```php
-$payment = $stripeKit->payments()->create([
-    'amount' => 2500,
-    'currency' => 'eur',
-    'customer_id' => 'cus_example',
-    'payment_method_id' => 'pm_example',
-    'description' => 'Example order',
-]);
-```
-
-Possible payment operations may include:
-
-```php
-$stripeKit->payments()->get($paymentId);
-$stripeKit->payments()->update($paymentId, [
-    'description' => 'Updated order',
-]);
-$stripeKit->payments()->capture($paymentId);
-$stripeKit->payments()->cancel($paymentId);
-```
-
-The exact distinction between creating, confirming, capturing, and cancelling payments will depend on the final StripeKit API design.
-
-## Planned Invoice Usage
-
-Applications will be expected to provide invoice data such as customer information, invoice items, quantities, prices, tax settings, and metadata.
-
-```php
-$invoice = $stripeKit->invoices()->create([
-    'customer_id' => 'cus_example',
-    'collection_method' => 'send_invoice',
-    'days_until_due' => 14,
-    'currency' => 'eur',
-    'items' => [
-        [
-            'description' => 'Website development',
-            'quantity' => 1,
-            'unit_amount' => 125000,
-        ],
-        [
-            'description' => 'Hosting',
-            'quantity' => 1,
-            'unit_amount' => 2500,
-        ],
-    ],
-    'metadata' => [
-        'order_id' => 'order_123',
+$result = $kit->webhooks->process([
+    'payload' => $rawRequestBody, // string, must be the raw, unparsed body
+    'signature' => $_SERVER['HTTP_STRIPE_SIGNATURE'],
+    'handlers' => [
+        'onPaymentSucceeded' => function ($paymentIntent) { /* ... */ },
+        'onInvoicePaid' => function ($invoice) { /* ... */ },
+        'onSubscriptionUpdated' => function ($subscription) { /* ... */ },
+        'onSubscriptionDeleted' => function ($subscription) { /* ... */ },
     ],
 ]);
 ```
 
-Planned invoice operations may include:
+`$kit->webhooks->process()` verifies the Stripe signature, deduplicates by event ID, and — unless you pass `autoSync: false` — automatically re-syncs the relevant object (payment, invoice, subscription, or payment methods) via your storage adapter before calling your handler. This means your database is always updated even if you don't implement a handler for a given event.
+
+### `$kit->sync`
+
+A convenience module for pulling the full current state of a customer from Stripe on demand, e.g. after a support request or a manual reconciliation job:
 
 ```php
-$stripeKit->invoices()->addItem($invoiceId, [
-    'description' => 'Additional support',
-    'quantity' => 2,
-    'unit_amount' => 5000,
-    'currency' => 'eur',
-]);
-
-$stripeKit->invoices()->update($invoiceId, [
-    'description' => 'Updated invoice description',
-]);
-
-$stripeKit->invoices()->finalize($invoiceId);
-$stripeKit->invoices()->send($invoiceId);
-$stripeKit->invoices()->pay($invoiceId);
-$stripeKit->invoices()->void($invoiceId);
-$stripeKit->invoices()->delete($invoiceId); // Intended for draft invoices only.
+$state = $kit->sync->everythingForCustomer($customerId, $userId);
+// $state['customer'], $state['subscriptions'], $state['invoices'], $state['paymentMethods']
 ```
 
-Invoice actions will be restricted according to Stripe's invoice status rules. For example, draft invoices may be updated or deleted, while finalized invoices may require different actions such as payment, voiding, or marking as uncollectible.
+## Stripe Elements (optional, browser-side)
 
-## Planned Subscription Usage
+Serve `resources/js/stripekit-elements.js` from the package alongside your app and import it only on the pages that need it — it is plain browser JavaScript and never touches your PHP process.
 
-StripeKit is intended to simplify the complete subscription lifecycle.
+```html
+<script type="module">
+  import { PaymentElementController } from '/vendor/ricardoneudorfer/stripekit/resources/js/stripekit-elements.js';
+
+  const controller = await PaymentElementController.create({
+    publishableKey,   // fetch this from your backend via $kit->toClientConfig()
+    clientSecret,     // returned by $kit->payments->create() or $kit->checkout->create() in 'elements' mode
+    appearance: { theme: 'stripe' },
+  });
+
+  controller.mount({ containerSelector: '#payment-element' });
+
+  const result = await controller.confirmPayment({
+    returnUrl: 'https://yourapp.com/billing/success',
+  });
+
+  if (!result.success) {
+    console.error(result.error);
+  }
+</script>
+```
+
+See `examples/elements-mode-frontend.html` for a full working page, and `examples/elements-mode-backend.php` for the matching PHP backend.
+
+## Error handling
+
+Every module throws typed exceptions you can catch and branch on:
 
 ```php
-$subscription = $stripeKit->subscriptions()->create([
-    'customer_id' => 'cus_example',
-    'price_id' => 'price_example',
-    'quantity' => 1,
-]);
+use StripeKit\Exceptions\{ValidationError, NotFoundError, StripeOperationError, ConfigurationError};
+
+try {
+    $kit->payments->create(['amount' => 10, 'currency' => 'usd']);
+} catch (ValidationError $error) {
+    // amount below Stripe's minimum, bad email, etc. $error->fieldErrors may be set.
+} catch (StripeOperationError $error) {
+    // Stripe itself rejected the request; $error->cause holds the original Stripe error.
+}
 ```
 
-Possible subscription operations:
+## Currency and amounts
+
+All amounts are always in minor currency units (cents), matching Stripe's own convention, so there's never ambiguity between `19.99` and `1999`. Helpers are available if you need to convert:
 
 ```php
-$stripeKit->subscriptions()->update($subscriptionId, [
-    'price_id' => 'price_new_example',
-    'quantity' => 2,
-]);
+use StripeKit\Support\Money;
 
-$stripeKit->subscriptions()->pause($subscriptionId);
-$stripeKit->subscriptions()->resume($subscriptionId);
-$stripeKit->subscriptions()->cancel($subscriptionId);
-$stripeKit->subscriptions()->cancelAtPeriodEnd($subscriptionId);
-$stripeKit->subscriptions()->resumeCancellation($subscriptionId);
+Money::toMinorUnits(19.99, 'usd');   // 1999
+Money::toMajorUnits(1999, 'usd');    // 19.99
+Money::formatMoney(1999, 'usd');     // "$19.99"
 ```
 
-The final implementation may use different method names or expose additional options for pause behavior, proration, billing cycle changes, trial periods, and cancellation timing.
+## Project structure
 
-## Database Responsibility
+```
+src/
+  StripeKit.php               Main class, init() and module wiring
+  Support/                    Timezone, money, validation, tokens, logging
+  Exceptions/                 StripeKitError and its subclasses
+  Contracts/
+    StorageAdapter.php        Optional persistence hook (abstract class, override what you need)
+  Modules/
+    BaseModule.php
+    CustomersModule.php
+    PaymentMethodsModule.php
+    PaymentsModule.php
+    CheckoutModule.php
+    SubscriptionsModule.php
+    InvoicesModule.php
+    CouponsModule.php
+    WebhooksModule.php
+    SyncModule.php
+resources/js/
+  stripekit-elements.js       Optional browser-side Stripe Elements helper
+examples/
+  basic-api-mode.php
+  elements-mode-backend.php
+  elements-mode-frontend.html
+  webhook-handler.php
+  storage-adapter-postgres.php
+docs/
+  TYPES.md                    Reference for every array shape used by the package
+```
 
-StripeKit is planned to handle the repetitive database work required by common Stripe integrations, including records, relationships, inserts, updates, and synchronization data. However, the application must always provide database credentials because StripeKit does not include or host a database.
+## Requirements
 
-Applications that require maximum customization should use custom tables. Applications that prefer convenience may disable custom tables and allow StripeKit to manage the required database structure.
-
-## Development Status
-
-StripeKit for PHP is **Coming Soon**.
-
-No stable API, production-ready release, or backwards-compatibility guarantee is available yet. Follow this repository for development updates, documentation changes, and release announcements.
+- PHP >= 8.1
+- `ext-intl` and `ext-json` (both installed automatically with most PHP distributions)
+- `stripe/stripe-php` ^17.0 (installed automatically via Composer)
 
 ## License
 
-The license and contribution guidelines will be added before the first public release.
+MIT

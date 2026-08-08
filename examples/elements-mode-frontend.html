@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>StripeKit Elements Example</title>
+  </head>
+  <body>
+    <div id="payment-element"></div>
+    <button id="pay-button">Pay</button>
+    <div id="error-message"></div>
+
+    <script type="module">
+      import { PaymentElementController } from '/vendor/ricardoneudorfer/stripekit/resources/js/stripekit-elements.js';
+
+      async function bootstrap() {
+        const configResponse = await fetch('/billing/client-config');
+        const { publishableKey } = await configResponse.json();
+
+        const checkoutResponse = await fetch('/billing/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'payment', email: 'customer@example.com' }),
+        });
+        const { clientSecret } = await checkoutResponse.json();
+
+        const controller = await PaymentElementController.create({
+          publishableKey,
+          clientSecret,
+          appearance: { theme: 'stripe' },
+        });
+
+        controller.mount({ containerSelector: '#payment-element' });
+
+        document.getElementById('pay-button').addEventListener('click', async () => {
+          const result = await controller.confirmPayment({
+            returnUrl: window.location.origin + '/billing/success',
+          });
+
+          if (!result.success) {
+            document.getElementById('error-message').textContent = result.error ?? 'Payment failed.';
+          }
+        });
+      }
+
+      bootstrap();
+    </script>
+  </body>
+</html>

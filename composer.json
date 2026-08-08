@@ -1,16 +1,36 @@
 {
   "name": "ricardoneudorfer/stripekit",
-  "description": "A simple toolkit for Stripe payments, invoices, subscriptions, and more.",
-  "type": "library",
+  "description": "A complete, production-ready Stripe integration toolkit for PHP. Handles customers, payment methods, payments, checkout, subscriptions, invoices, coupons, webhooks and Stripe Elements with built-in timezone handling.",
   "license": "MIT",
+  "type": "library",
+  "keywords": [
+    "stripe",
+    "payments",
+    "subscriptions",
+    "invoices",
+    "checkout",
+    "elements",
+    "billing",
+    "php"
+  ],
+  "authors": [
+    {
+      "name": "Ricardo Neudorfer"
+    }
+  ],
+  "require": {
+    "php": ">=8.1",
+    "ext-json": "*",
+    "ext-intl": "*",
+    "stripe/stripe-php": "^17.0"
+  },
   "autoload": {
     "psr-4": {
       "StripeKit\\": "src/"
     }
   },
-  "require": {
-    "php": ">=8.1"
+  "config": {
+    "sort-packages": true
   },
-  "minimum-stability": "dev",
-  "prefer-stable": true
+  "minimum-stability": "stable"
 }
