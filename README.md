@@ -14,4 +14,4 @@ You stay in full control of your database and UI. StripeKit only talks to Stripe
 - **Covers the whole billing surface.** Customers, payment methods, one-off payments, checkout (payment or subscription, with custom fields and coupons), subscriptions, invoices, coupons/promotion codes, and webhooks with automatic state sync.
 
 Full documentation is available at:
-https://docs.explorericardo.com/packagist-packages/stripekit/installation
+https://docs.ricardoneudorfer.com/packagist-packages/stripekit/installation
